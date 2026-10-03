@@ -194,6 +194,12 @@ const data = await page.evaluate(async (live) => {
     rootStyle: live ? html.getAttribute("style") || "" : "",
     classes: [...classes].map(([d, c]) => `.${c}{${d}}`),
     rules, keep, fonts, blocked, urls: [...urls], rootVars,
+    // families the original itself failed to load: the site renders with the fallback, so must the clone
+    brokenFonts: (() => {
+      const st = {};
+      for (const ff of document.fonts) (st[ff.family.replace(/^["']|["']$/g, "")] ||= new Set()).add(ff.status);
+      return Object.keys(st).filter((k) => st[k].has("error") && !st[k].has("loaded"));
+    })(),
     count: n,
   };
 }, live);
@@ -249,6 +255,11 @@ for (const href of data.blocked) {
   } catch { /* leave it out */ }
 }
 data.fonts.unshift(...remote);
+if (data.brokenFonts.length) {
+  const fam = (t) => (t.match(/font-family:s*["']?([^;"'}]+)/) || [])[1]?.trim();
+  data.fonts = data.fonts.filter((t) => !data.brokenFonts.includes(fam(t)));
+  console.log("dropped @font-face that failed on the original:", data.brokenFonts.join(", "));
+}
 
 // download assets (images, svg, css background urls, fonts)
 const bgUrls = new Set();
