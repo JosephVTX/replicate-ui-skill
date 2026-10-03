@@ -46,6 +46,8 @@ the `=` form: `--decl="--foreground:"`.
 
 | Script | Use it to |
 |---|---|
+| **`snapshot.mjs`** | **Static pixel-exact clone of a rendered page in seconds (`live` or `frozen` mode)** |
+| **`snapdiff.mjs`** | **Cheap numeric check of a clone: pixels + element boxes, `--crop` for the hot box** |
 | `capture.mjs` | Full-page screenshot, all JS/CSS/HTML responses, stack fingerprint, "settled?" check |
 | `bundle-modules.mjs` | Split Turbopack/webpack chunks into modules; find them by visible text; follow imports |
 | `rsc-refs.mjs` | Which client components an RSC page mounts, and their module ids |
@@ -64,6 +66,27 @@ the `=` form: `--decl="--foreground:"`.
 | `theme-leak.mjs` | Theme scales (`--ease-*`, `--radius-*`, `--text-*`) the host redefines under the block |
 | `png-tools.mjs` | Diff two PNGs; zoomed side-by-side crop of a hot cell |
 | `fingerprint-version.mjs` | Which npm versions of a library contain a code fingerprint |
+
+## Fast path: clone the rendered result (start here)
+
+Don't re-derive what the browser already resolved. Two scripts, no LLM and no images in the loop:
+
+```bash
+node "$WS/snapshot.mjs" --url <original> --out clone            # ~10 s; --mode frozen for CSS-in-JS pages; --dark
+node "$WS/snapdiff.mjs" --url <original> --replica clone --width 390   # prints numbers only
+```
+
+`snapshot` writes a static `index.html` (no JS) with the DOM as rendered, the site's own CSS
+verbatim (layers, media/container queries, hover, keyframes, `@font-face`) and every asset
+downloaded; lazy images are made eager and running animations are cancelled to read their base
+state. `snapdiff` screenshots both sides, diffs in code and compares every element's box and
+colors; read the JSON, and only if `pixelsOver40 > 0` use `--crop out.png` to look at the hot box.
+Check 390, 768, 1024, 1440 and `--dark`. Measured on a Next/Tailwind portfolio: 0 differing
+pixels and 0 element mismatches at all four widths and dark, 57 KB of HTML+CSS.
+
+Go on to the manual workflow below only for what a static clone cannot hold: logic (menus,
+tabs, charts, search), state driven by JS, or turning the clone into reusable components. In
+that case use the clone as the reference and refactor under `snapdiff`.
 
 ## Workflow
 
