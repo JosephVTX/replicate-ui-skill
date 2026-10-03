@@ -204,45 +204,64 @@ const data = await page.evaluate(async (live) => {
   };
 }, live);
 
-// scroll behaviour: sticky/fixed headers that change class/style (shrink, hide on scroll down, blur...)
-const scrollFx = await page.evaluate(async () => {
+// scroll behaviour: records how attributes (class/style/data-*) evolve while scrolling a FRESH load
+// of the page (sticky headers, parallax/motion effects, reveal-on-scroll), down then up.
+const fp = await ctx.newPage();
+await fp.goto(url, { waitUntil: "networkidle" });
+await fp.waitForTimeout(wait);
+const scrollFx = await fp.evaluate(async (hgt) => {
   const SKIP = new Set(["SCRIPT", "NOSCRIPT", "LINK", "META", "STYLE", "TEMPLATE", "BASE"]);
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const all = [document.body, ...document.body.querySelectorAll("*")].filter((e) => !SKIP.has(e.tagName));
   const path = (el) => { const p = []; for (let e = el; e && e !== document.body; e = e.parentElement) p.unshift([...e.parentElement.children].filter((c) => !SKIP.has(c.tagName)).indexOf(e)); return p; };
   const IGN = /^(data-sn|nonce|loading|src|srcset|href)$/;
   const st = (e) => { const o = {}; for (const a of e.attributes) if (!IGN.test(a.name)) o[a.name] = a.value; return o; };
-  const snap = () => new Map(all.map((e) => [e, st(e)]));
-  const J = JSON.stringify;
+  const snap = () => all.map((e) => JSON.stringify(st(e)));
+  // scroll, then wait until the page stops changing (rAF-smoothed effects settle), max ~400ms
+  const settle = async (y) => {
+    scrollTo(0, y); await wait(50);
+    let prev = snap().join("");
+    for (let i = 0; i < 7; i++) { await wait(50); const cur = snap(); const j = cur.join(""); if (j === prev) return cur; prev = j; }
+    return snap();
+  };
   const room = document.documentElement.scrollHeight - innerHeight;
-  if (room < 200) return null;
-  scrollTo(0, 0); await wait(400);
+  if (room < 100) return null;
+  const step = Math.max(40, Math.ceil(room / 220 / 10) * 10);
+  const K = Math.ceil(room / step);
+  scrollTo(0, 0); await wait(600);
   const base = snap();
-  // tracked = fixed/sticky elements and their descendants
-  const tracked = new Set([document.body]);
-  const mark = () => { for (const e of all) { const p = getComputedStyle(e).position; if (p === "fixed" || p === "sticky") { tracked.add(e); e.querySelectorAll("*").forEach((d) => tracked.add(d)); } } };
-  mark();
-  let T = null;
-  for (let y = 10; y <= Math.min(1200, room); y += y < 100 ? 10 : 40) {
-    scrollTo(0, y); await wait(120);
-    const s = snap();
-    if ([...tracked].some((e) => J(s.get(e)) !== J(base.get(e)))) { T = y; break; }
-  }
-  if (T == null) { scrollTo(0, 0); return { threshold: null }; }
-  const goDown = async () => { for (let y = 0; y <= T + 400; y += 40) { scrollTo(0, y); await wait(40); } await wait(700); return snap(); };
-  const down = await goDown();
-  for (let y = T + 400; y > T + 200; y -= 40) { scrollTo(0, y); await wait(40); }
-  await wait(700);
-  const up = snap();
-  scrollTo(0, 0); await wait(500);
-  mark();
-  const diffs = [];
-  for (const e of tracked) {
-    const b = J(base.get(e)), d = J(down.get(e)), u = J(up.get(e));
-    if (b !== d || b !== u) diffs.push({ p: path(e), tag: e.localName, down: down.get(e), up: up.get(e) });
-  }
-  return { threshold: T, diffs, directional: diffs.some((x) => J(x.down) !== J(x.up)) };
+  const frames = { d: [base], u: [] };
+  // down pass
+  for (let k = 1; k <= K; k++) frames.d.push(await settle(Math.min(room, k * step)));
+  await wait(500);
+  frames.d[K] = snap();
+  // up pass (reveals stay revealed, headers may react to direction)
+  frames.u[K] = frames.d[K];
+  for (let k = K - 1; k >= 0; k--) frames.u[k] = await settle(k * step);
+  await wait(500);
+  frames.u[0] = snap();
+  scrollTo(0, 0);
+  // elements that ever differ from their initial state
+  const out = [];
+  all.forEach((e, i) => {
+    const b = JSON.parse(base[i]);
+    const track = (list) => {
+      const res = []; let prevKey = "{}";
+      list.forEach((fr, k) => {
+        const o = JSON.parse(fr[i]), d = {};
+        for (const key in o) if (o[key] !== b[key]) d[key] = o[key];
+        for (const key in b) if (!(key in o)) d[key] = null;
+        const kj = JSON.stringify(d);
+        if (kj !== prevKey) { res.push([k, d]); prevKey = kj; }
+      });
+      return res;
+    };
+    const d = track(frames.d), u = track(frames.u);
+    if (d.length || u.length) { const bb = {}; for (const [, df] of [...d, ...u]) for (const key in df) bb[key] = key in b ? b[key] : null; out.push({ p: path(e), t: e.localName, bb, d, u }); }
+  });
+  return { step, K, room, n: out.length, items: out };
 });
+await fp.close();
 await browser.close();
 
 // cross-origin stylesheets (Google Fonts, CDN css) are unreadable from the page: fetch them here
@@ -293,17 +312,18 @@ const css = [
 const rootCls = data.rootClass ? ` class="${data.rootClass}"` : "";
 
 let fxScript = "";
-if (scrollFx && scrollFx.threshold != null && scrollFx.diffs.length) {
-  const T = scrollFx.threshold, D = scrollFx.diffs.map((d) => [d.p, d.down, d.up]);
-  fxScript = "<script>(function(){var SKIP=/^(SCRIPT|NOSCRIPT|LINK|META|STYLE|TEMPLATE|BASE)$/,T=" + T + ",D=" + JSON.stringify(D).replace(/</g, "\u003c") + ",last=0;" +
-    "function find(p){var e=document.body;for(var i=0;i<p.length&&e;i++)e=[].filter.call(e.children,function(c){return !SKIP.test(c.tagName)})[p[i]];return e}" +
-    "var els=D.map(function(d){var e=find(d[0]);if(!e)return null;var b={};[].forEach.call(e.attributes,function(a){b[a.name]=a.value});return{e:e,b:b,d:d[1],u:d[2]}}).filter(Boolean);" +
-    "function set(e,v){[].slice.call(e.attributes).forEach(function(a){if(!(a.name in v)&&!/^(src|srcset|href|loading)$/.test(a.name))e.removeAttribute(a.name)});for(var k in v)if(e.getAttribute(k)!==v[k])e.setAttribute(k,v[k])}" +
-    "function f(){var y=scrollY,k=y<T?'b':y>=last?'d':'u';last=y;els.forEach(function(x){set(x.e,x[k])})}" +
-    "addEventListener('scroll',f,{passive:true});f()})()</script>";
+if (scrollFx && scrollFx.n) {
+  const P = JSON.stringify(scrollFx.items.map((x) => [x.p, x.t, x.d, x.u, x.bb])).replace(/</g, "\u003c").replace(/[\u2028\u2029]/g, "");
+  fxScript = "<script>(function(){var SKIP=/^(SCRIPT|NOSCRIPT|LINK|META|STYLE|TEMPLATE|BASE)$/,STEP=" + scrollFx.step + ",K=" + scrollFx.K + ",ROOM=" + scrollFx.room + ",P=" + P + ",last=0,dir='d';" +
+    "function find(p,t){var e=document.body;for(var i=0;i<p.length&&e;i++)e=[].filter.call(e.children,function(c){return !SKIP.test(c.tagName)})[p[i]];return e&&e.localName===t?e:null}" +
+    "var els=P.map(function(x){var e=find(x[0],x[1]);if(!e)return null;return{e:e,d:x[2],u:x[3],b:x[4],cur:null}}).filter(Boolean);" +
+    "function pick(l,k){var r=null;for(var i=0;i<l.length&&l[i][0]<=k;i++)r=l[i][1];return r}" +
+    "function apply(x,diff){var key=JSON.stringify(diff);if(x.cur===key)return;x.cur=key;var e=x.e,b=x.b;for(var n in b){var v=diff&&n in diff?diff[n]:b[n];if(v===null){if(e.hasAttribute(n))e.removeAttribute(n)}else if(e.getAttribute(n)!==v)e.setAttribute(n,v)}}" +
+    "var busy=0;function f(){busy=0;var y=Math.min(scrollY,ROOM),k=Math.max(0,Math.min(K,Math.round(y/STEP)));if(y>last)dir='d';else if(y<last)dir='u';last=y;els.forEach(function(x){apply(x,pick(dir==='d'?x.d:x.u,k))})}" +
+    "addEventListener('scroll',function(){if(!busy){busy=1;requestAnimationFrame(f)}},{passive:true});f()})()</script>";
 }
 const html = `<!doctype html><html lang="${data.lang}"${rootCls}${data.rootStyle ? ` style="${data.rootStyle.replace(/"/g, "&quot;")}"` : ""}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${data.title}</title><style>${rewrite(css)}</style></head>${rewrite(data.body.replace(/^<body/, "<body"))}${fxScript}</html>`;
 fs.writeFileSync(path.join(out, "index.html"), html);
 fs.writeFileSync(path.join(out, "snapshot.json"), JSON.stringify({ url, width, elements: data.count, classes: data.classes.length, keptRules: data.keep.length, assets: map.size, bytes: html.length }, null, 1));
-if (scrollFx) console.log(scrollFx.threshold == null ? "scroll: no header/state change detected" : `scroll: ${scrollFx.diffs.length} elements change at scrollY>=${scrollFx.threshold}${scrollFx.directional ? " (direction-dependent)" : ""} -> replayed with a small script`);
+if (scrollFx) console.log(`scroll: ${scrollFx.n} elements react to scroll (${scrollFx.K} frames every ${scrollFx.step}px) -> replayed with a small script`); else console.log("scroll: page too short, nothing to replay");
 console.log(`snapshot: ${data.count} elements, ${data.classes.length} classes, ${data.keep.length} state/media rules, ${map.size} assets, ${(html.length / 1024).toFixed(0)} KB -> ${out}/index.html`);

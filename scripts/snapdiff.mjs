@@ -44,6 +44,28 @@ async function shoot(u, replica) {
   return { png: PNG.sync.read(png), full, tree };
 }
 
+// --scroll 1500,6000: compare the viewport at those scroll positions, reached by scrolling down in steps
+if (arg("scroll")) {
+  const ys = String(arg("scroll")).split(",").map(Number);
+  const grab = async (u, replica) => {
+    const p = await ctx.newPage();
+    await p.goto(u, { waitUntil: replica ? "load" : "networkidle" });
+    await p.waitForTimeout(1500);
+    const res = []; let cur = 0;
+    for (const y of ys) {
+      for (; cur < y; cur += 100) { await p.evaluate(([v, m]) => scrollTo(0, Math.min(v, m)), [cur + 100, y]); await p.waitForTimeout(40); }
+      await p.waitForTimeout(900);
+      res.push(PNG.sync.read(await p.screenshot()));
+    }
+    await p.close();
+    return res;
+  };
+  const A = await grab(url, false), B = await grab(rep, true);
+  const rows = A.map((x, k) => { let bad = 0; for (let i = 0; i < x.data.length; i += 4) if (Math.max(Math.abs(x.data[i] - B[k].data[i]), Math.abs(x.data[i + 1] - B[k].data[i + 1]), Math.abs(x.data[i + 2] - B[k].data[i + 2])) > 40) bad++; return { y: ys[k], pct: +((bad / (x.width * x.height)) * 100).toFixed(3) }; });
+  console.log(JSON.stringify(rows));
+  await browser.close();
+  process.exit(0);
+}
 const a = await shoot(url, false);
 const b = await shoot(rep, true);
 await browser.close();
